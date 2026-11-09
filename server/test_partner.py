@@ -106,9 +106,22 @@ class TestLots(PartnerBase):
         self.ctl(lots=500)
         self.assertEqual(self.enter()["lots"], 80)
 
-    def test_bad_lots_fall_back_to_base_size(self):
-        self.ctl(lots="lots")
-        self.assertEqual(self.enter()["lots"], 200)
+    def test_bad_or_missing_lots_never_use_the_base_size(self):
+        for c in ({"lots": "lots"}, {"lots": 0}, {"live": True}):
+            self.ctl(**c)
+            self.assertIsNone(self.enter())
+            self.assertEqual(self.fx.orders, [])
+
+    def test_startup_line_shows_partner_lots_and_stop(self):
+        self.ctl(lots=40)
+        said = []
+        self.b.notify = said.append
+        self.b.sleep = lambda s: (_ for _ in ()).throw(SystemExit)
+        with self.assertRaises(SystemExit):
+            self.b.run()
+        self.assertIn("40 lots from the control file", said[0])
+        self.assertIn("stop at $36", said[0])
+        self.assertNotIn("200 lots", said[0])
 
 
 class TestPaperNights(PartnerBase):
@@ -131,16 +144,13 @@ class TestPaperNights(PartnerBase):
         self.ctl(lots=50, live=True, paper_dates=["2020-01-01"])
         self.assertEqual(self.enter()["trade_mode"], "live")
 
-    def test_unreadable_control_file_means_paper(self):
+    def test_unreadable_or_missing_control_file_means_no_trade(self):
         with open(self.ctl_path, "w") as f:
             f.write("{not json")
-        pos = self.enter()
-        self.assertEqual((pos["trade_mode"], pos["lots"]), ("paper", 200))
+        self.assertIsNone(self.enter())
+        os.remove(self.ctl_path)
+        self.assertIsNone(self.enter())
         self.assertEqual(self.fx.orders, [])
-
-    def test_missing_control_file_means_paper(self):
-        pos = self.enter()
-        self.assertEqual(pos["trade_mode"], "paper")
 
     def test_off_switch_after_entry_does_not_touch_open_trade(self):
         self.ctl(lots=50, live=True)

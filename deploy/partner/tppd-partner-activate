@@ -22,6 +22,7 @@ if command -v systemd-creds >/dev/null 2>&1 && printf x | systemd-creds encrypt 
     rm -f "$PROBE"
     printf %s "$KEY" | systemd-creds encrypt --name=delta_api_key - "/etc/tppd/creds/$S.key.cred"
     printf %s "$SEC" | systemd-creds encrypt --name=delta_api_secret - "/etc/tppd/creds/$S.secret.cred"
+    chmod 600 "/etc/tppd/creds/$S.key.cred" "/etc/tppd/creds/$S.secret.cred"
     printf '[Service]\nLoadCredentialEncrypted=delta_api_key:/etc/tppd/creds/%s.key.cred\nLoadCredentialEncrypted=delta_api_secret:/etc/tppd/creds/%s.secret.cred\n' "$S" "$S" > "$D/creds.conf"
     HOW="encrypted (systemd-creds)"
 else
