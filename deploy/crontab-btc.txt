@@ -1,0 +1,1 @@
+0 * * * * cd /home/ubuntu/btc_bot && .venv/bin/python vol_ping.py >> /home/ubuntu/btc_bot/data_condor/vol_ping.log 2>&1
