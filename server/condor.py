@@ -994,9 +994,13 @@ class Condor:
             calm, why_in = self.damp_check(today)
             if not calm:
                 return
+        lots = self.lots_tonight(ctl)
+        if ctl is not None and lots is None:
+            self.note("nolots", "partner control file has no valid lots: not trading", every_s=3600)
+            return                                          # never fall back to the base profile's size
         if not self.entry_delay_done(today):
             return
-        p, why = self.plan(lots=self.lots_tonight(ctl))
+        p, why = self.plan(lots=lots)
         if not p:
             self.note("skip", f"no entry yet: {why}", every_s=600)
             if self.state.get("last_skip") != today:
@@ -1081,7 +1085,13 @@ class Condor:
                    f"1h/6h/24h vol <= {self.cfg.DAMP_RV1:.0f}/{self.cfg.DAMP_RV6:.0f}/{self.cfg.DAMP_RV24:.0f}%.")
         else:
             win = f"Entry window {self.cfg.ENTRY_IST} IST +{self.cfg.ENTRY_WINDOW_MIN} min."
-        self.notify(f"Nightly bot started ({self.cfg.MODE}, {kind} ${self.cfg.MAX_LOSS_USD:.0f}{extra}). "
+        if self.cfg.CONTROL_FILE:                       # partner: size and stop come from the control file
+            c = self.control() or {}
+            n = self.lots_tonight(c)
+            kind, extra = "strangle, stop at", (f", {n} lots from the control file" if n else ", NO LOTS SET - not trading")
+            self.cfg_stop_text = self.stop_for(n)[0] if n else 0
+        self.notify(f"Nightly bot started ({self.cfg.MODE}, {kind} "
+                    f"${(self.cfg_stop_text if self.cfg.CONTROL_FILE else self.cfg.MAX_LOSS_USD):.0f}{extra}). "
                     f"{win}{skip}")
         while True:
             try:
