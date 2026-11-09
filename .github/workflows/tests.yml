@@ -19,9 +19,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -r requirements.txt
       - name: Run all test suites (offline, no keys)
-        run: python -m unittest -v test_condor test_btc_pnl test_collector test_thursday test_bot 2>&1 | tail -5
+        run: python -m unittest -v test_condor test_partner test_btc_pnl test_collector test_thursday test_bot 2>&1 | tail -5
       - name: Fail on any test failure
-        run: python -m unittest test_condor test_btc_pnl test_collector test_thursday test_bot
+        run: python -m unittest test_condor test_partner test_btc_pnl test_collector test_thursday test_bot
   no-secrets:
     runs-on: ubuntu-latest
     steps:
