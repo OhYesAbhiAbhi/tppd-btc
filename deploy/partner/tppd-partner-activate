@@ -1,0 +1,33 @@
+#!/bin/bash
+# Root-only. Usage: tppd-partner-activate <slug>
+# Opens the partner's browser-made envelope with the vault key, seals key + secret as systemd encrypted
+# credentials (tied to this server), writes the instance settings, and starts tppd-partner@<slug>.
+set -euo pipefail
+S="$1"; [[ "$S" =~ ^[a-z0-9-]{1,30}$ ]] || { echo "bad name"; exit 2; }
+H=/home/ubuntu; P="$H/btc_partners/$S"; PY="$H/btc_bot/.venv/bin/python"
+id "tp-$S" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "tp-$S"
+mkdir -p "$P/data" /etc/tppd/creds && chmod 700 /etc/tppd/creds
+chown "tp-$S:tp-$S" "$P/data" && chmod 750 "$P/data" && setfacl -m u:ubuntu:rx "$P/data" 2>/dev/null || true
+ENV_JSON=$(sqlite3 "$H/btc_partners/portal.db" "SELECT envelope FROM partners WHERE slug='$S' AND status IN ('pending','active')")
+[ -n "$ENV_JSON" ] || { echo "no envelope for $S"; exit 3; }
+KS=$(echo "$ENV_JSON" | "$PY" "$H/btc_bot/partner_vault.py" open /etc/tppd/vault.key)
+echo "$KS" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["key"],end="")' | systemd-creds encrypt --name=delta_api_key - "/etc/tppd/creds/$S.key.cred"
+echo "$KS" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["secret"],end="")' | systemd-creds encrypt --name=delta_api_secret - "/etc/tppd/creds/$S.secret.cred"
+unset KS ENV_JSON
+SLOT=$(ls /etc/tppd/creds/*.key.cred 2>/dev/null | wc -l)
+# strategy = the owner's settings (CONDOR_*, FEE_*, GST), minus anything per-partner; then partner overrides
+grep -E '^(CONDOR_|FEE_|GST)' "$H/btc_bot/.env" | grep -vE '^CONDOR_(DATA_DIR|CONTROL_FILE|ALERTS|ENTRY_DELAY_SEC|AUTO_PAPER|MAX_LOTS|STOP_PER_LOT)=' > "$P/instance.env.tmp"
+cat >> "$P/instance.env.tmp" <<E2
+DELTA_ENV=prod
+CONDOR_MODE=live
+CONDOR_DATA_DIR=$P/data
+CONDOR_CONTROL_FILE=$P/control.json
+CONDOR_ALERTS=off
+CONDOR_AUTO_PAPER=on
+CONDOR_MAX_LOTS=100000
+CONDOR_STOP_PER_LOT=0.90
+CONDOR_ENTRY_DELAY_SEC=$((60 * SLOT))
+E2
+mv "$P/instance.env.tmp" "$P/instance.env" && chmod 644 "$P/instance.env"
+systemctl daemon-reload && systemctl enable --now "tppd-partner@$S"
+echo "started tppd-partner@$S (entry delay $((60 * SLOT)) s)"

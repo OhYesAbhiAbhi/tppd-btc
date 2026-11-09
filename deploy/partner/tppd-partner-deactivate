@@ -1,0 +1,7 @@
+#!/bin/bash
+# Root-only. Usage: tppd-partner-deactivate <slug>  - stops the partner's bot and deletes its sealed key.
+set -uo pipefail
+S="$1"; [[ "$S" =~ ^[a-z0-9-]{1,30}$ ]] || { echo "bad name"; exit 2; }
+systemctl disable --now "tppd-partner@$S" 2>/dev/null
+shred -u "/etc/tppd/creds/$S.key.cred" "/etc/tppd/creds/$S.secret.cred" 2>/dev/null || rm -f /etc/tppd/creds/$S.*.cred
+echo "stopped tppd-partner@$S and deleted its key"
