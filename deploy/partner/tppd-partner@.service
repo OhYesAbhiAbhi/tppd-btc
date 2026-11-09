@@ -7,9 +7,8 @@ Wants=network-online.target
 User=tp-%i
 WorkingDirectory=/home/ubuntu/btc_partners/%i
 Environment=BOT_ENV_FILE=/home/ubuntu/btc_partners/%i/instance.env
-# Delta key and secret: sealed by tppd-partner-activate, readable only by this service, in memory only
-LoadCredentialEncrypted=delta_api_key:/etc/tppd/creds/%i.key.cred
-LoadCredentialEncrypted=delta_api_secret:/etc/tppd/creds/%i.secret.cred
+# Delta key and secret: tppd-partner-activate adds them in tppd-partner@<slug>.service.d/creds.conf
+# (encrypted credentials where systemd-creds exists, else root-only files); the bot sees them in memory only.
 ExecStart=/home/ubuntu/btc_bot/.venv/bin/python /home/ubuntu/btc_bot/condor.py
 Restart=always
 RestartSec=20

@@ -21,9 +21,16 @@ say() { echo "  $*"; }
 cd "$REPO" 2>/dev/null || fail "no repo at $REPO"
 git fetch -q --tags --force origin 2>/dev/null || fail "cannot reach GitHub (check the deploy key)"
 
+if [ "${1:-}" = "--restart-partners" ]; then
+    for u in $($SYSTEMCTL list-units --type=service --state=active --no-legend 'tppd-partner@*' 2>/dev/null | awk '{print $1}'); do
+        slug=${u#tppd-partner@}; slug=${slug%.service}
+        if "$PY" -c "import json,sys;sys.exit(1 if (json.load(open(sys.argv[1])) or {}).get('open') else 0)" "$HOME/btc_partners/$slug/data/state.json" 2>/dev/null; then
+            $SYSTEMCTL restart "$u" && say "restarted $slug"; else say "$slug: trade open, try later"; fi
+    done; exit 0
+fi
 if [ "${1:-}" = "--status" ]; then
     echo "Installed: $(cat "$BOT/RELEASE" 2>/dev/null || echo 'unknown (before deploy tooling)')"
-    for s in tppd-condor tppd-pnl tppd-collector tppd-thursday tppd-btc; do say "$s: $($SYSTEMCTL is-active $s 2>/dev/null)"; done
+    for s in tppd-condor tppd-pnl tppd-collector tppd-thursday tppd-btc tppd-partner-portal tppd-partner-results; do say "$s: $($SYSTEMCTL is-active $s 2>/dev/null)"; done
     exit 0
 fi
 
@@ -62,6 +69,8 @@ for n in $CHANGED; do
         btc_pnl.py) add tppd-pnl;;
         collector.py) add tppd-collector;;
         thursday_paper.py) add tppd-thursday;;
+        partner_portal.py|partner_results.py|partner_vault.py) add tppd-partner-portal; add tppd-partner-results;;
+        partner_results_bot.py) add tppd-partner-results;;
         *) ;;
     esac
 done
@@ -100,6 +109,17 @@ fi
 echo "$TAG $SHA $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')" > "$BOT/RELEASE"
 
 for s in $ACTIVE; do $SYSTEMCTL restart "$s" || say "WARNING: restart of $s failed"; done
+# partner bots run the same condor.py: restart each one only when it holds no position
+LATER=""
+case " $SVC " in *" tppd-condor "*)
+    for u in $($SYSTEMCTL list-units --type=service --state=active --no-legend 'tppd-partner@*' 2>/dev/null | awk '{print $1}'); do
+        slug=${u#tppd-partner@}; slug=${slug%.service}
+        if "$PY" -c "import json,sys;sys.exit(1 if (json.load(open(sys.argv[1])) or {}).get('open') else 0)" \
+              "$HOME/btc_partners/$slug/data/state.json" 2>/dev/null || [ ! -f "$HOME/btc_partners/$slug/data/state.json" ]; then
+            $SYSTEMCTL restart "$u" && ACTIVE="$ACTIVE $u"
+        else LATER="$LATER $slug"; fi
+    done;;
+esac
 # keep ~/deploy itself current (older releases such as r1 have no deploy tool: keep the newer one)
 [ -f "$REPO/deploy/deploy.sh" ] && cp "$REPO/deploy/deploy.sh" "$SELF.new" && chmod +x "$SELF.new" && mv "$SELF.new" "$SELF"
 sleep "${DEPLOY_SETTLE:-4}"
@@ -108,4 +128,5 @@ say "files:$CHANGED"
 say "backup: $B   (undo: ~/deploy <previous release>)"
 for s in $ACTIVE; do say "$s: $($SYSTEMCTL is-active $s)"; done
 [ -z "$ACTIVE" ] && say "no running service needed a restart"
+[ -n "$LATER" ] && say "partner bots with a trade open, NOT restarted yet:$LATER  (run ~/deploy --restart-partners after their trades close)"
 exit 0

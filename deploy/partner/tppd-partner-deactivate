@@ -3,5 +3,6 @@
 set -uo pipefail
 S="$1"; [[ "$S" =~ ^[a-z0-9-]{1,30}$ ]] || { echo "bad name"; exit 2; }
 systemctl disable --now "tppd-partner@$S" 2>/dev/null
-shred -u "/etc/tppd/creds/$S.key.cred" "/etc/tppd/creds/$S.secret.cred" 2>/dev/null || rm -f /etc/tppd/creds/$S.*.cred
+for f in /etc/tppd/creds/$S.key* /etc/tppd/creds/$S.secret*; do [ -f "$f" ] && shred -u "$f"; done
+rm -rf "/etc/systemd/system/tppd-partner@$S.service.d"; systemctl daemon-reload
 echo "stopped tppd-partner@$S and deleted its key"
