@@ -88,6 +88,13 @@ except FileNotFoundError:
 PYX
 ;; esac
 
+# libraries the version needs (adds missing ones; doesn't touch running bots)
+PIP="${DEPLOY_PIP:-$(dirname "$PY")/pip}"
+if [ -f "$REPO/server/requirements.txt" ] && ! cmp -s "$REPO/server/requirements.txt" "$BOT/.requirements.installed"; then
+    "$PIP" install -q -r "$REPO/server/requirements.txt" > /dev/null 2>&1 || fail "could not install the Python libraries it needs"
+    cp "$REPO/server/requirements.txt" "$BOT/.requirements.installed"
+fi
+
 # test exactly the version being installed: its own code and its own tests
 T=$(mktemp -d); cp "$REPO"/server/*.py "$T"/
 TESTS=$(cd "$T" && ls test_*.py | sed 's/\.py$//' | tr '\n' ' ')
