@@ -33,6 +33,20 @@ If no check is calm by the end, no trade, and Telegram says so. CONDOR_ENTRY_MOD
 From 7 Nov 2026, CONDOR_DRIFT_EXIT_PCT=2.0 (strangle): close both legs once BTC has moved that many % from the
 entry price, up or down, even if the volatility exit hasn't fired. Checked with every watch (~10 s). 0 = off.
 
+From 9 Nov 2026 (release r2), partner instances. All OFF by default; the owner's bot is unchanged:
+  CONDOR_CONTROL_FILE=path  JSON the partner controls: {"lots": 50, "live": true, "paper_dates": ["2026-11-20"],
+                            "close_now": "<request id>"}. Read before every entry, so changes need no restart.
+                            Set but missing/unreadable -> that night is traded on paper.
+  Each trade keeps its own stop and warning (stop_usd / warn_usd in state.json): a lot change never alters
+  an open trade. CONDOR_STOP_PER_LOT>0 = $ per lot; otherwise lots other than CONDOR_FIXED_LOTS scale
+  CONDOR_MAX_LOSS_USD per lot ($180 at 200 lots -> $0.90 a lot).
+  Paper nights (switched off, planned paper day, or CONDOR_AUTO_PAPER=on when a live entry is blocked by
+  key/balance/margin): same decisions, no orders, recorded with mode=paper.
+  close_now: closes both legs at market (recorded live, "closed by you"), then follows the original trade on
+  paper to its normal exit, recorded with mode=shadow ("bot's result if held"). Ignored after expiry.
+  CONDOR_ALERTS=off: no Telegram from this instance. CONDOR_ENTRY_DELAY_SEC: wait after the entry signal.
+  Delta key/secret may come from systemd credentials (delta_api_key / delta_api_secret) instead of .env.
+
 Once a day, around CONDOR_ENTRY_IST (default 21:30 IST), sell a ~0.20-delta put and call for the
 NEXT day's 17:30 IST expiry, buy ~0.07-delta wings further out, and hold everything to
 settlement. No stops: the wings cap the loss. Size: lots chosen so a full-width loss plus fees
@@ -79,6 +93,18 @@ def _env(name, default, cast=str):
     return cast(v.split(" #", 1)[0].strip())
 
 
+def _cred(name):
+    """A secret handed over by systemd (LoadCredentialEncrypted=...), read from $CREDENTIALS_DIRECTORY;
+    "" when not running under systemd credentials (then .env is used, as before)."""
+    d = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not d:
+        return ""
+    try:
+        return (Path(d) / name).read_text().strip()
+    except OSError:
+        return ""
+
+
 class CondorConfig:
     MODE = _env("CONDOR_MODE", "paper")                       # paper | live
     STYLE = _env("CONDOR_STYLE", "strangle")                  # strangle (with stop) | condor
@@ -86,8 +112,8 @@ class CondorConfig:
     WARN_USD = _env("CONDOR_WARN_USD", 25.0, float)           # Telegram warning at this open loss
     WATCH_SECONDS = _env("CONDOR_WATCH_SECONDS", 10, int)     # loop speed while a strangle is open
     DELTA_ENV = _env("DELTA_ENV", "prod")
-    API_KEY = _env("DELTA_API_KEY", "")
-    API_SECRET = _env("DELTA_API_SECRET", "")
+    API_KEY = _cred("delta_api_key") or _env("DELTA_API_KEY", "")
+    API_SECRET = _cred("delta_api_secret") or _env("DELTA_API_SECRET", "")
     ENTRY_IST = _env("CONDOR_ENTRY_IST", "21:30")             # start of the nightly entry window
     ENTRY_WINDOW_MIN = _env("CONDOR_ENTRY_WINDOW_MIN", 60, int)
     SHORT_DELTA = _env("CONDOR_SHORT_DELTA", 0.20, float)
@@ -119,6 +145,12 @@ class CondorConfig:
     DAMP_SUN_FROM_IST = _env("CONDOR_DAMP_SUN_FROM_IST", "05:00")  # Sunday nights: first check (Monday)
     DAMP_CHECK_MIN = _env("CONDOR_DAMP_CHECK_MIN", 15, int)   # minutes between checks
     DRIFT_EXIT_PCT = _env("CONDOR_DRIFT_EXIT_PCT", 0.0, float)  # strangle: exit if BTC moves this % from entry; 0 = off
+    # --- partner instances (all off by default; the owner's bot behaves exactly as before) ---
+    CONTROL_FILE = _env("CONDOR_CONTROL_FILE", "")            # JSON: lots, live, paper_dates, close_now; "" = off
+    STOP_PER_LOT = _env("CONDOR_STOP_PER_LOT", 0.0, float)    # stop $/lot for control-file lots; 0 = MAX_LOSS_USD/FIXED_LOTS
+    AUTO_PAPER = _env("CONDOR_AUTO_PAPER", False, bool)       # live entry blocked (key/balance/margin) -> paper that night
+    ALERTS = _env("CONDOR_ALERTS", "full")                    # full = Telegram as before | off = log only
+    ENTRY_DELAY_SEC = _env("CONDOR_ENTRY_DELAY_SEC", 0, int)  # wait this long after the entry signal (staggered entries)
     PERP_SYMBOL = _env("CONDOR_PERP_SYMBOL", "BTCUSD")
     MAX_MARGIN_USE_PCT = _env("CONDOR_MAX_MARGIN_USE_PCT", 0.50, float)
     EXPIRY_HOUR_IST, EXPIRY_MIN_IST = 17, 30
@@ -208,6 +240,8 @@ class Condor:
 
     def notify(self, msg):
         log.info(msg)
+        if (self.cfg.ALERTS or "full").strip().lower() != "full":
+            return                                          # partner instances: results go out via the results bot
         if self.cfg.TELEGRAM_BOT_TOKEN and self.cfg.TELEGRAM_CHAT_ID:
             try:
                 requests.post(f"https://api.telegram.org/bot{self.cfg.TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -413,7 +447,89 @@ class Condor:
         return dt
 
     # ------------------------------------------------------------ selection
-    def plan(self):
+    # ------------------------------------------------------ partner controls
+    def control(self):
+        """The partner control file as a dict, or None when CONDOR_CONTROL_FILE is off. Set but missing or
+        unreadable -> {"_error": ...}, and the night is traded on paper (the safe side)."""
+        path = self.cfg.CONTROL_FILE
+        if not path:
+            return None
+        try:
+            c = json.loads(Path(path).read_text())
+            if not isinstance(c, dict):
+                raise ValueError("not a JSON object")
+            return c
+        except (OSError, ValueError) as e:
+            self.note("ctl-bad", f"control file unreadable ({e}); trading on paper", every_s=1800)
+            return {"_error": str(e)}
+
+    def lots_tonight(self, ctl):
+        """Lots from the control file (capped at CONDOR_MAX_LOTS), or None to use the usual sizing."""
+        try:
+            n = int((ctl or {}).get("lots") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        return min(n, self.cfg.MAX_LOTS) if n > 0 else None
+
+    def stop_for(self, lots):
+        """(stop $, warning $) for a strangle of `lots`. Owner default: CONDOR_MAX_LOSS_USD / CONDOR_WARN_USD.
+        CONDOR_STOP_PER_LOT > 0, or lots other than CONDOR_FIXED_LOTS: scaled per lot."""
+        cfg = self.cfg
+        if cfg.STOP_PER_LOT > 0:
+            per = cfg.STOP_PER_LOT
+        elif cfg.FIXED_LOTS > 0 and lots != cfg.FIXED_LOTS:
+            per = cfg.MAX_LOSS_USD / cfg.FIXED_LOTS
+        else:
+            return cfg.MAX_LOSS_USD, cfg.WARN_USD
+        stop = round(lots * per, 2)
+        warn = round(stop * cfg.WARN_USD / cfg.MAX_LOSS_USD, 2) if cfg.MAX_LOSS_USD > 0 else round(stop / 2, 2)
+        return stop, warn
+
+    def trade_mode(self, ctl):
+        """('live' | 'paper', reason) for tonight's entry."""
+        if self.cfg.MODE != "live":
+            return "paper", ""
+        if ctl is None:
+            return "live", ""
+        if ctl.get("_error"):
+            return "paper", "settings file unreadable"
+        if ctl.get("live") is False:
+            return "paper", "trading switched off"
+        if self.night_day().isoformat() in (ctl.get("paper_dates") or []):
+            return "paper", "planned paper day"
+        return "live", ""
+
+    def live(self, pos):
+        """Does this position hold real orders? (Old positions without trade_mode follow CONDOR_MODE.)"""
+        return (pos or {}).get("trade_mode", self.cfg.MODE) == "live"
+
+    def entry_delay_done(self, night):
+        """CONDOR_ENTRY_DELAY_SEC: wait that long after the entry signal before trading (staggered partners)."""
+        d = self.cfg.ENTRY_DELAY_SEC
+        if d <= 0:
+            return True
+        r = self.state.get("ready") or {}
+        if r.get("night") != night:
+            self.state["ready"] = {"night": night, "at": self.now()}
+            self.save()
+            return False
+        return self.now() - r["at"] >= d
+
+    def close_now(self, pos, rid):
+        """Partner pressed 'Close my trade now': close both legs at market and record that (live), then keep
+        following the original trade on paper to its normal exit, recorded as mode 'shadow'."""
+        self.state["close_done"] = rid
+        if not self.live(pos) or pos.get("shadow"):
+            self.save()                                     # nothing real to close
+            return
+        pnl, asks = self.open_pnl(pos)
+        shadow = json.loads(json.dumps(pos))
+        self.stop_out(pos, pnl, asks, reason="closed by you")
+        shadow.update(trade_mode="shadow", shadow=True, closed_early_ts=self.now())
+        self.state["open"] = shadow
+        self.save()
+
+    def plan(self, lots=None):
         """Pick the four legs for the next expiry. Returns (plan dict, reason)."""
         cfg = self.cfg
         exp = self.next_expiry()
@@ -438,14 +554,14 @@ class Condor:
         if not ps or not cs:
             return None, f"no tradeable ~{cfg.SHORT_DELTA:.2f}-delta {'put' if not ps else 'call'}"
         pw, cw = wing(ps), wing(cs)
-        fixed = cfg.STYLE == "strangle" and cfg.FIXED_LOTS > 0
+        fixed = cfg.STYLE == "strangle" and (cfg.FIXED_LOTS > 0 or bool(lots))
         cv = float(self.product(ps.symbol).get("contract_value", 0.001))
         if fixed:                                               # strangle at a fixed size: wings not needed
             sold = ps.bid + cs.bid
             return {"expiry": exp, "spot": spot, "legs": {"put_short": ps, "call_short": cs},
                     "credit": sold, "fees_in": self.fee(ps.bid, spot) + self.fee(cs.bid, spot),
-                    "width": cs.strike - ps.strike, "lots": min(cfg.FIXED_LOTS, cfg.MAX_LOTS),
-                    "max_loss_usd": cfg.MAX_LOSS_USD, "cv": cv}, "ok"
+                    "width": cs.strike - ps.strike, "lots": lots or min(cfg.FIXED_LOTS, cfg.MAX_LOTS),
+                    "max_loss_usd": self.stop_for(lots or min(cfg.FIXED_LOTS, cfg.MAX_LOTS))[0], "cv": cv}, "ok"
         if not pw or not cw:
             return None, f"no wing within {cfg.MAX_WIDTH:.0f} points"
         sold = ps.bid + cs.bid
@@ -565,7 +681,7 @@ class Condor:
         return True, f"margin in use {used:.0%}"
 
     # ---------------------------------------------------------------- entry
-    def enter(self, p, why=""):
+    def enter(self, p, why="", ctl=None):
         cfg = self.cfg
         mode, tp, dip, rv24 = self.night_mode()          # decided before any order is sent
         L = p["legs"]
@@ -573,15 +689,19 @@ class Condor:
         order = [x for x in [("put_wing", "buy"), ("call_wing", "buy"), ("put_short", "sell"),
                              ("call_short", "sell")] if x[0] in L]
         legs = {}
-        if cfg.MODE == "paper":
+        tmode, treason = self.trade_mode(ctl)
+        if tmode == "live":
+            ok, why_m = self.margin_ok()
+            if not ok:
+                if not cfg.AUTO_PAPER:
+                    return False, why_m
+                tmode, treason = "paper", f"live entry not possible: {why_m}"
+        if tmode == "paper":
             for name, side in order:
                 c = L[name]
                 legs[name] = {"symbol": c.symbol, "product_id": c.product_id, "kind": c.kind,
                               "strike": c.strike, "side": side, "entry": c.ask if side == "buy" else c.bid}
         else:
-            ok, why = self.margin_ok()
-            if not ok:
-                return False, why
             want, err = lots, ""
             for name, side in order:
                 c = L[name]
@@ -610,11 +730,12 @@ class Condor:
             lots = want
         credit = sum(l["entry"] * (1 if l["side"] == "sell" else -1) for l in legs.values())
         fees_in = sum(self.fee(l["entry"], p["spot"]) for l in legs.values())
+        stop, warn = self.stop_for(lots)
         if cfg.STYLE == "condor":
             max_loss = (p["width"] - credit + fees_in + self.settle_fee_max(p["spot"])) * p["cv"] * lots
         else:
-            max_loss = cfg.MAX_LOSS_USD
-        pos = {"mode": mode, "tp": tp, "dip": dip, "rv24": rv24, "style": cfg.STYLE, "entry_ts": self.now(), "below": 0, "warned": False, "expiry_ts": p["expiry"].timestamp(),
+            max_loss = stop
+        pos = {"trade_mode": tmode, "paper_reason": treason, "stop_usd": stop, "warn_usd": warn, "mode": mode, "tp": tp, "dip": dip, "rv24": rv24, "style": cfg.STYLE, "entry_ts": self.now(), "below": 0, "warned": False, "expiry_ts": p["expiry"].timestamp(),
                "expiry": p["expiry"].strftime("%Y-%m-%d %H:%M"), "lots": lots, "cv": p["cv"],
                "spot": p["spot"], "legs": legs, "credit": credit, "fees_in": fees_in,
                "max_loss_usd": round(max_loss, 2)}
@@ -622,10 +743,12 @@ class Condor:
         self.state["last_entry_date"] = self.night_day().isoformat()
         self.save()
         s = lambda n: f"{legs[n]['strike']:.0f}"
+        if tmode == "paper" and cfg.MODE == "live":
+            why = f"PAPER tonight ({treason}). " + why
         if cfg.STYLE == "strangle":
             self.notify(why + f"STRANGLE x{lots} for {p['expiry']:%d %b} 17:30 expiry (BTC {p['spot']:,.0f}): "
                         f"sold put {s('put_short')} + call {s('call_short')}. Credit {credit:.1f}/BTC = "
-                        f"${credit * p['cv'] * lots:.2f}. Stop: close both at -${cfg.MAX_LOSS_USD:.0f} "
+                        f"${credit * p['cv'] * lots:.2f}. Stop: close both at -${stop:.0f} "
                         f"(not guaranteed in a gap). " + self.mode_text(mode, tp, dip, rv24, credit))
             return True, "ok"
         self.notify(f"IRON CONDOR x{lots} for {p['expiry']:%d %b} 17:30 expiry (BTC {p['spot']:,.0f}): "
@@ -664,6 +787,7 @@ class Condor:
         """Strangle only: close both legs once the open loss reaches MAX_LOSS_USD."""
         pos, cfg = self.state["open"], self.cfg
         pnl, asks = self.open_pnl(pos)
+        stop, warn = pos.get("stop_usd", cfg.MAX_LOSS_USD), pos.get("warn_usd", cfg.WARN_USD)
         self.note("hold", f"strangle x{pos['lots']} open P&L {pnl:+.2f} USD", every_s=900)
         tp = pos.get("tp", cfg.TAKE_PROFIT)
         if 0 < tp < 1 and sum(asks.values()) <= (1 - tp) * pos["credit"]:
@@ -704,12 +828,12 @@ class Condor:
                     self.save()
                     self.notify(f"VOL ALERT CLEARED: {cfg.DIP_WINDOW_MIN}-min vol back to {rv:.0f}% after "
                                 f"{mins:.0f} min; holding. Open P&L {pnl:+.2f} USD.")
-        if pnl <= -cfg.WARN_USD and not pos.get("warned"):
+        if pnl <= -warn and not pos.get("warned"):
             pos["warned"] = True
             self.save()
-            self.notify(f"Strangle open loss {pnl:+.2f} USD (stop at -{cfg.MAX_LOSS_USD:.0f}). "
+            self.notify(f"Strangle open loss {pnl:+.2f} USD (stop at -{stop:.0f}). "
                         f"BTC {self.spot():,.0f}.")
-        if pnl > -cfg.MAX_LOSS_USD:
+        if pnl > -stop:
             if pos.get("below"):
                 pos["below"] = 0
                 self.save()
@@ -724,7 +848,7 @@ class Condor:
     def stop_out(self, pos, pnl_seen, asks, reason="stop"):
         exits, left = {}, 0
         for n, l in pos["legs"].items():
-            if self.cfg.MODE == "paper":
+            if not self.live(pos):
                 exits[n] = asks[n]
             else:
                 px, got, rem = self._close(l, "sell", pos["lots"])
@@ -749,7 +873,7 @@ class Condor:
             w = csv.writer(f)
             if new:
                 w.writerow(TRADE_COLS)
-            w.writerow([self.cfg.MODE, pos.get("style", "condor"),
+            w.writerow([pos.get("trade_mode", self.cfg.MODE), pos.get("style", "condor"),
                         datetime.fromtimestamp(pos["entry_ts"], IST).strftime("%Y-%m-%d %H:%M"),
                         pos["expiry"], pos["lots"], g("put_short"), g("put_wing"), g("call_short"),
                         g("call_wing"), round(pos["spot"], 1), round(pos["credit"], 2), pos["max_loss_usd"],
@@ -773,7 +897,7 @@ class Condor:
 
     def settle(self):
         pos = self.state["open"]
-        if self.cfg.MODE == "live":
+        if self.live(pos):
             try:
                 held = {x.get("product_symbol") for x in self.c.positions() if float(x.get("size", 0))}
             except DeltaAPIError as e:
@@ -809,6 +933,14 @@ class Condor:
     # ------------------------------------------------------------------ loop
     def step(self):
         pos = self.state["open"]
+        ctl = self.control()
+        rid = str((ctl or {}).get("close_now") or "")
+        if rid and rid != self.state.get("close_done"):
+            if pos and self.now() < pos["expiry_ts"]:
+                self.close_now(pos, rid)
+                return
+            self.state["close_done"] = rid                  # stale, or after expiry: never closes a later trade
+            self.save()
         if pos:
             if self.now() >= pos["expiry_ts"] + self.cfg.SETTLE_WAIT_MIN * 60:
                 self.settle()
@@ -862,14 +994,16 @@ class Condor:
             calm, why_in = self.damp_check(today)
             if not calm:
                 return
-        p, why = self.plan()
+        if not self.entry_delay_done(today):
+            return
+        p, why = self.plan(lots=self.lots_tonight(ctl))
         if not p:
             self.note("skip", f"no entry yet: {why}", every_s=600)
             if self.state.get("last_skip") != today:
                 self.state["last_skip"] = today
                 self.save()
             return
-        ok, why = self.enter(p, why_in)
+        ok, why = self.enter(p, why_in, ctl=ctl)
         if not ok:
             self.note("enter-fail", f"entry not completed: {why}", every_s=300)
 
