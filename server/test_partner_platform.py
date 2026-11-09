@@ -92,3 +92,94 @@ class TestResults(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPortal(unittest.TestCase):
+    def setUp(self):
+        import partner_portal as pp
+        self.pp = pp
+        self.tmp = tempfile.mkdtemp()
+        pp.ROOT = __import__("pathlib").Path(self.tmp)
+        self.priv, self.pub = pv.make_keys()
+        pubf = os.path.join(self.tmp, "vault.pub")
+        open(pubf, "w").write(self.pub)
+        pp.PUBKEY = __import__("pathlib").Path(pubf)
+        self.st = pp.open_store()
+        self.env = __import__("json").dumps(pv.seal(self.pub, {"key": "REALKEY99", "secret": "REALSECRET99"}))
+
+    def form(self, **kw):
+        f = {"c": self.st.get("invite"), "name": "Ravi Kumar", "contact": "98765", "pw": "pin123", "lots": "50",
+             "envelope": self.env, "ack": "yes"}
+        f.update(kw)
+        return {k: [v] for k, v in f.items()}
+
+    def test_signup_stores_ciphertext_only(self):
+        ok, token = self.pp.signup(self.st, self.form())
+        self.assertTrue(ok, token)
+        p = self.st.partner(token=token)
+        self.assertEqual((p["status"], p["lots"], p["slug"]), ("pending", 50, "ravi-kumar"))
+        dump = str(self.st.q("SELECT * FROM partners"))
+        self.assertNotIn("REALKEY99", dump)
+        self.assertNotIn("pin123", dump)
+        self.assertEqual(pv.open_envelope(self.priv, __import__("json").loads(p["envelope"]))["key"], "REALKEY99")
+
+    def test_signup_checks(self):
+        self.assertFalse(self.pp.signup(self.st, self.form(c="wrong"))[0])
+        self.assertFalse(self.pp.signup(self.st, self.form(envelope="plain key"))[0])
+        self.assertFalse(self.pp.signup(self.st, self.form(ack=""))[0])
+        self.assertFalse(self.pp.signup(self.st, self.form(pw="12"))[0])
+
+    def active(self):
+        ok, token = self.pp.signup(self.st, self.form())
+        msg = self.pp.approve(self.st, "ravi-kumar", activate=lambda s: (True, ""))
+        self.assertIn("approved", msg)
+        return self.st.partner(token=token)
+
+    def test_approve_writes_control_and_actions(self):
+        p = self.active()
+        c = self.pp.control(p["slug"])
+        self.assertEqual((c["lots"], c["live"]), (50, True))
+        f = lambda **kw: {k: [v] for k, v in kw.items()}
+        self.pp.partner_action(self.st, p, f(a="lots", lots="80"))
+        self.pp.partner_action(self.st, p, f(a="off"))
+        d = (self.pp.today() + __import__("datetime").timedelta(days=3)).isoformat()
+        self.pp.partner_action(self.st, p, f(a="paperday", day=d))
+        c = self.pp.control(p["slug"])
+        self.assertEqual((c["lots"], c["live"], c["paper_dates"]), (80, False, [d]))
+        self.assertIn("no open trade", self.pp.partner_action(self.st, p, f(a="close")))
+        os.makedirs(os.path.join(self.tmp, p["slug"], "data"), exist_ok=True)
+        open(os.path.join(self.tmp, p["slug"], "data", "state.json"), "w").write('{"open": {"lots": 80}}')
+        self.pp.partner_action(self.st, p, f(a="close"))
+        self.assertTrue(self.pp.control(p["slug"])["close_now"])
+
+    def test_approval_refused_without_vault_helper(self):
+        self.pp.signup(self.st, self.form())
+        self.assertIn("Could not start", self.pp.approve(self.st, "ravi-kumar", activate=lambda s: (False, "no helper")))
+        self.assertEqual(self.st.partner(slug="ravi-kumar")["status"], "pending")
+
+    def test_revoke_deletes_ciphertext(self):
+        p = self.active()
+        self.pp.revoke(self.st, p["slug"], deactivate=lambda s: None)
+        q = self.st.partner(slug=p["slug"])
+        self.assertEqual((q["status"], q["envelope"]), ("revoked", None))
+
+    def test_partner_page_shows_results_not_details(self):
+        p = self.active()
+        d = os.path.join(self.tmp, p["slug"], "data")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "trades.csv"), "w", newline="") as fh:
+            w = csv.DictWriter(fh, COLS)
+            w.writeheader()
+            w.writerow({c: "" for c in COLS} | {"mode": "live", "entry_ist": "2026-11-06 22:40", "expiry": "2026-11-07 17:30",
+                        "lots": 50, "net_usd": "18.4", "put_short": "80800", "call_short": "83200", "note": "exchange settlement price"})
+        html_ = self.pp.partner_page(self.st, p, 2026, 11)
+        self.assertIn("+$18.40", html_)
+        for s in ("80800", "83200", "settlement", "22:40", "REALKEY"):
+            self.assertNotIn(s, html_)
+        self.assertIn("Ravi Kumar", self.pp.master_page(self.st))
+
+    def test_join_page_has_public_key_only(self):
+        h = self.pp.join_page(self.st, self.st.get("invite"))
+        self.assertIn(self.pub[:40], h)
+        self.assertIn("RSA-OAEP", h)
+        self.assertIn("3.106.111.8", h)
