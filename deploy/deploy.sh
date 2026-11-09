@@ -8,6 +8,7 @@
 # Safety: refuses when tppd-condor would restart outside 11:35-22:25 IST or while it holds a position;
 # runs the full test suite on this server first; backs up every file it replaces; never touches .env or data.
 set -u
+[ -c /dev/null ] || { echo "DEPLOY STOPPED - /dev/null is damaged. Repair: sudo rm -f /dev/null && sudo mknod -m 666 /dev/null c 1 3"; exit 1; }
 if [ -z "${DEPLOY_COPY:-}" ]; then                       # run from a copy: the checkout below may change this file
     c=$(mktemp /tmp/deploy.XXXXXX); cp "$0" "$c"; DEPLOY_COPY=1 exec bash "$c" "$@"
 fi

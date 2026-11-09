@@ -3,6 +3,7 @@
 # Opens the partner's browser-made envelope with the vault key, seals key + secret as systemd encrypted
 # credentials (tied to this server), writes the instance settings, and starts tppd-partner@<slug>.
 set -euo pipefail
+[ -c /dev/null ] || { echo "STOP: /dev/null is not a device - repair it first: rm -f /dev/null && mknod -m 666 /dev/null c 1 3"; exit 4; }
 S="$1"; [[ "$S" =~ ^[a-z0-9-]{1,30}$ ]] || { echo "bad name"; exit 2; }
 H=/home/ubuntu; P="$H/btc_partners/$S"; PY="$H/btc_bot/.venv/bin/python"
 id "tp-$S" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin -G tppd-partners "tp-$S"
@@ -15,12 +16,16 @@ KEY=$(echo "$KS" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["key"],e
 SEC=$(echo "$KS" | "$PY" -c 'import json,sys;print(json.load(sys.stdin)["secret"],end="")')
 unset KS ENV_JSON
 D="/etc/systemd/system/tppd-partner@$S.service.d"; mkdir -p "$D"
-if command -v systemd-creds >/dev/null 2>&1 && printf x | systemd-creds encrypt --name=t - /dev/null 2>/dev/null; then
+# probe into a temp file: systemd-creds REPLACES its output file (never point it at /dev/null)
+PROBE=$(mktemp /etc/tppd/creds/.probe.XXXXXX)
+if command -v systemd-creds >/dev/null 2>&1 && printf x | systemd-creds encrypt --name=t - "$PROBE" 2>/dev/null; then
+    rm -f "$PROBE"
     printf %s "$KEY" | systemd-creds encrypt --name=delta_api_key - "/etc/tppd/creds/$S.key.cred"
     printf %s "$SEC" | systemd-creds encrypt --name=delta_api_secret - "/etc/tppd/creds/$S.secret.cred"
     printf '[Service]\nLoadCredentialEncrypted=delta_api_key:/etc/tppd/creds/%s.key.cred\nLoadCredentialEncrypted=delta_api_secret:/etc/tppd/creds/%s.secret.cred\n' "$S" "$S" > "$D/creds.conf"
     HOW="encrypted (systemd-creds)"
 else
+    rm -f "$PROBE"
     ( umask 077; printf %s "$KEY" > "/etc/tppd/creds/$S.key"; printf %s "$SEC" > "/etc/tppd/creds/$S.secret" )
     printf '[Service]\nLoadCredential=delta_api_key:/etc/tppd/creds/%s.key\nLoadCredential=delta_api_secret:/etc/tppd/creds/%s.secret\n' "$S" "$S" > "$D/creds.conf"
     HOW="root-only file (this Ubuntu has no systemd-creds)"
