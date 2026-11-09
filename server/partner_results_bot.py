@@ -21,6 +21,18 @@ import partner_portal as pp
 import partner_results as pr
 
 SEND_AFTER = os.environ.get("PARTNER_SEND_AFTER", "17:45")
+PUBLIC_URL = os.environ.get("PARTNER_PUBLIC_URL", "https://3-106-111-8.sslip.io").rstrip("/")
+
+
+def dashboard(p):
+    return f"{PUBLIC_URL}/p/{p['token']}"
+
+
+def welcome_text(p):
+    return (f"Welcome, {p['name']}! You're approved.\n\n"
+            f"Your private dashboard (bookmark it, and don't share it):\n{dashboard(p)}\n\n"
+            f"It shows your daily results, and lets you change lots or switch trading on/off. "
+            f"You'll also get one message here each day with your result. Send /link any time to get the link again.")
 
 
 def tg(token, method, **params):
@@ -60,18 +72,39 @@ class ResultsBot:
                 return self.send(cid, "This link is not valid. Use the Telegram link on your results page.")
             self.st.q("UPDATE partners SET tg_chat=?, updated=? WHERE slug=?", (cid, pp.now(), q["slug"]))
             self.st.log(q["slug"], "partner", "telegram linked")
-            return self.send(cid, f"Linked, {q['name']}. You'll get one message a day with your result.")
+            if q["status"] == "active":
+                self.st.put(f"welcomed:{q['slug']}", "1")
+                return self.send(cid, welcome_text(q))
+            return self.send(cid, f"Linked, {q['name']}. Your request is waiting for approval; you'll get a message here "
+                                  f"with your dashboard link once it's approved.")
         if not p:
             return self.send(cid, "This chat isn't linked. Use the Telegram link on your results page.")
         ds = pp.results(p["slug"])
         t = self.ist().date()
         if text.startswith("/today"):
             return self.send(cid, pr.day_message(t, ds.get(t), ds))
+        if text.startswith("/link"):
+            return self.send(cid, f"Your private dashboard (bookmark it, and don't share it):\n{dashboard(p)}")
         if text.startswith("/month"):
             mt_ = pr.month_totals(ds, t.year, t.month)
             return self.send(cid, f"{t:%B}: {pr.money(mt_['live_net'])} live over {mt_['live_days']} days "
                                   f"({mt_['win_days']} winning). Paper, not counted: {pr.money(mt_['paper_net'])}.")
-        return self.send(cid, "Commands: /today, /month")
+        return self.send(cid, "Commands: /today, /month, /link")
+
+    def welcome(self):
+        """Partners approved after linking Telegram: send the dashboard link once."""
+        n = 0
+        for p in self.st.q("SELECT * FROM partners WHERE status='active' AND tg_chat IS NOT NULL"):
+            key = f"welcomed:{p['slug']}"
+            if self.st.get(key):
+                continue
+            try:
+                self.send(p["tg_chat"], welcome_text(p))
+            except Exception:
+                continue                                     # retried on the next loop
+            self.st.put(key, "1")
+            n += 1
+        return n
 
     def daily(self):
         t = self.ist()
@@ -118,6 +151,7 @@ class ResultsBot:
                         self.handle(u)
                     except Exception:
                         pass
+                self.welcome()
                 self.daily()
                 self.safety()
             except Exception:

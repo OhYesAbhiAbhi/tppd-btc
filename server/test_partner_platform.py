@@ -200,7 +200,7 @@ class TestResultsBot(TestPortal):
         p = self.active()
         b = self.bot()
         b.handle(self.upd(555, f"/start {p['tg_code']}"))
-        self.assertIn("Linked, Ravi Kumar", self.sent[-1][1])
+        self.assertIn("Welcome, Ravi Kumar", self.sent[-1][1])
         b.handle(self.upd(777, f"/today"))
         self.assertIn("isn't linked", self.sent[-1][1])           # strangers learn nothing
         self.assertEqual(b.daily(), 1)
@@ -236,3 +236,36 @@ class TestResultsBot(TestPortal):
         self.st.put("tg_bot", "TPPDResultsBot")
         h = self.pp.partner_page(self.st, p, 2026, 11)
         self.assertIn(f"t.me/TPPDResultsBot?start={p['tg_code']}", h)
+
+
+class TestWelcome(TestResultsBot):
+    def test_link_before_approval_then_welcome_once(self):
+        ok, token = self.pp.signup(self.st, self.form())
+        p = self.st.partner(token=token)
+        b = self.bot()
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        self.assertIn("waiting for approval", self.sent[-1][1])
+        self.assertNotIn(token, self.sent[-1][1])                 # no link before approval
+        self.assertEqual(b.welcome(), 0)
+        self.pp.approve(self.st, p["slug"], activate=lambda s: (True, ""))
+        self.assertEqual(b.welcome(), 1)
+        msg = self.sent[-1][1]
+        self.assertIn(f"https://3-106-111-8.sslip.io/p/{token}", msg)
+        self.assertIn("bookmark", msg)
+        self.assertEqual(b.welcome(), 0)                          # only once
+
+    def test_link_after_approval_gets_welcome_immediately(self):
+        p = self.active()
+        b = self.bot()
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        self.assertIn(f"/p/{p['token']}", self.sent[-1][1])
+        self.assertEqual(b.welcome(), 0)
+
+    def test_link_command(self):
+        p = self.active()
+        b = self.bot()
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        b.handle(self.upd(555, "/link"))
+        self.assertIn(f"/p/{p['token']}", self.sent[-1][1])
+        b.handle(self.upd(777, "/link"))
+        self.assertNotIn(p["token"], self.sent[-1][1])            # strangers never get it
