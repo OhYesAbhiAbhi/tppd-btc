@@ -1,0 +1,9 @@
+3-106-111-8.sslip.io {
+	handle_path /btc/* {
+		reverse_proxy 127.0.0.1:8095
+	}
+	handle /calendar* {
+		reverse_proxy 127.0.0.1:8001
+	}
+  reverse_proxy 127.0.0.1:8000
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=TPPD BTC options-writing bot (Delta Exchange)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc_bot
+ExecStart=/home/ubuntu/btc_bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

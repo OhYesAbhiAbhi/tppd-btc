@@ -1,0 +1,14 @@
+[Unit]
+Description=TPPD nightly BTC iron condor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc_bot
+ExecStart=/home/ubuntu/btc_bot/.venv/bin/python condor.py
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

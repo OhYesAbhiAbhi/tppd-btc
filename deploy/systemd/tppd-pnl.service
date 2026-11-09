@@ -1,0 +1,13 @@
+[Unit]
+Description=TPPD BTC P&L calendar page (read-only)
+After=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc_bot
+ExecStart=/home/ubuntu/btc_bot/.venv/bin/python btc_pnl.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
