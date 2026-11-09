@@ -1,0 +1,22 @@
+[Unit]
+Description=TPPD nightly strangle for partner %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tp-%i
+WorkingDirectory=/home/ubuntu/btc_partners/%i
+Environment=BOT_ENV_FILE=/home/ubuntu/btc_partners/%i/instance.env
+# Delta key and secret: tppd-partner-activate adds them in tppd-partner@<slug>.service.d/creds.conf
+# (encrypted credentials where systemd-creds exists, else root-only files); the bot sees them in memory only.
+ExecStart=/home/ubuntu/btc_bot/.venv/bin/python /home/ubuntu/btc_bot/condor.py
+Restart=always
+RestartSec=20
+MemoryMax=300M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/btc_partners/%i/data
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
