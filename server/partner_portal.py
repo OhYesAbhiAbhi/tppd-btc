@@ -343,6 +343,12 @@ def partner_page(st, p, y, m, msg=""):
 {form('paperday', f"<input type=date name=day min='{today().isoformat()}'><span class=mute>tap again to undo</span>")}
 {form('close', "<span>Close my open trade now</span>", 'bad') if position_open(p['slug']) else ''}
 <p class=mute>Changes apply at the next entry. Each lot needs margin in your Delta account; keep a buffer for fast moves.</p></div>"""
+    bot = st.get("tg_bot")
+    tgcard = "" if not bot else (
+        f"<div class=card><h2>Daily result on Telegram</h2>" + (
+            "<p>Connected. You get one message a day.</p>" if p["tg_chat"] else
+            f"<p><a href='https://t.me/{esc(bot)}?start={esc(p['tg_code'])}'>Open Telegram and press Start</a> "
+            f"to get one message a day with your result.</p>") + "</div>")
     status = {"pending": "Waiting for approval.", "active": "", "suspended": "Paused by Abhineet.",
               "revoked": "Access ended."}.get(p["status"], "")
     return page("My results", f"""<h1>{esc(p['name'])}</h1>{f'<div class=msg>{esc(msg)}</div>' if msg else ''}{f'<div class=msg>{status}</div>' if status else ''}
@@ -351,7 +357,7 @@ def partner_page(st, p, y, m, msg=""):
 <div class=kpi><div>Month (live)<b class={money_cls(mt['live_net'])}>{pr.money(mt['live_net'])}</b></div><div>Live days<b>{mt['live_days']}</b></div>
 <div>Winning days<b>{mt['win_days']}</b></div><div>All-time live<b class={money_cls(alltime)}>{pr.money(alltime)}</b></div>
 <div>Paper (not counted)<b class=paper>{pr.money(mt['paper_net'])}</b></div></div><br>
-<div class=cal>{''.join(f'<div class=mute>{w}</div>' for w in pr.WEEKDAY)}{''.join(cells)}</div></div>{ctrl}""")
+<div class=cal>{''.join(f'<div class=mute>{w}</div>' for w in pr.WEEKDAY)}{''.join(cells)}</div></div>{ctrl}{tgcard}""")
 
 
 def master_page(st, msg=""):

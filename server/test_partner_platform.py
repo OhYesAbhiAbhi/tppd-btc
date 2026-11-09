@@ -183,3 +183,56 @@ class TestPortal(unittest.TestCase):
         self.assertIn(self.pub[:40], h)
         self.assertIn("RSA-OAEP", h)
         self.assertIn("3.106.111.8", h)
+
+
+class TestResultsBot(TestPortal):
+    def bot(self, active=True, at="2026-11-09 18:00"):
+        import partner_results_bot as rb
+        from datetime import datetime as dt
+        self.sent = []
+        t = dt.strptime(at, "%Y-%m-%d %H:%M").replace(tzinfo=self.pp.IST).timestamp()
+        return rb.ResultsBot(self.st, "x", send=lambda c, m: self.sent.append((c, m)), active=lambda s: active, now_fn=lambda: t)
+
+    def upd(self, chat, text, kind="private"):
+        return {"message": {"chat": {"id": chat, "type": kind}, "text": text}}
+
+    def test_link_daily_once_and_privacy(self):
+        p = self.active()
+        b = self.bot()
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        self.assertIn("Linked, Ravi Kumar", self.sent[-1][1])
+        b.handle(self.upd(777, f"/today"))
+        self.assertIn("isn't linked", self.sent[-1][1])           # strangers learn nothing
+        self.assertEqual(b.daily(), 1)
+        self.assertEqual(self.sent[-1], ("555", "Mon 9 Nov · No trade today"))
+        self.assertEqual(b.daily(), 0)                            # once a day
+        b.handle(self.upd(555, "/month"))
+        self.assertIn("November", self.sent[-1][1])
+        self.assertNotIn("Ravi", str(self.sent[1:]))
+
+    def test_not_before_send_time_and_groups_ignored(self):
+        p = self.active()
+        b = self.bot(at="2026-11-09 17:00")
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        self.assertEqual(b.daily(), 0)
+        n = len(self.sent)
+        b.handle(self.upd(-100, f"/start {p['tg_code']}", kind="group"))
+        self.assertEqual(len(self.sent), n)
+
+    def test_safety_alert_once_when_bot_down_with_trade(self):
+        p = self.active()
+        b = self.bot(active=False)
+        b.handle(self.upd(555, f"/start {p['tg_code']}"))
+        os.makedirs(os.path.join(self.tmp, p["slug"], "data"), exist_ok=True)
+        open(os.path.join(self.tmp, p["slug"], "data", "state.json"), "w").write(
+            '{"open": {"trade_mode": "live", "entry_ts": 1}}')
+        b.safety()
+        b.safety()
+        alerts = [m for c, m in self.sent if "stopped with a trade open" in m]
+        self.assertEqual(len(alerts), 1)
+
+    def test_page_shows_telegram_link(self):
+        p = self.active()
+        self.st.put("tg_bot", "TPPDResultsBot")
+        h = self.pp.partner_page(self.st, p, 2026, 11)
+        self.assertIn(f"t.me/TPPDResultsBot?start={p['tg_code']}", h)
