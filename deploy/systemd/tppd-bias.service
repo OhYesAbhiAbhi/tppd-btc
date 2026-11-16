@@ -1,0 +1,14 @@
+[Unit]
+Description=TPPD BTC option-flow bias trade (live on BIAS_LIVE_DAYS when BIAS_MODE=live, paper otherwise)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/btc_bot
+ExecStart=/home/ubuntu/btc_bot/.venv/bin/python bias_trader.py
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target
