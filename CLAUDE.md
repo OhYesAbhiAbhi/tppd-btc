@@ -6,7 +6,7 @@ running on Abhineet's AWS Lightsail server (3.106.111.8, user `ubuntu`, code in 
 ## Layout
 - `server/` — the server's `~/btc_bot` code, file for file. `condor.py` is the live nightly strangle
   (service `tppd-condor`). `btc_pnl.py` = P&L calendar page (`tppd-pnl`), `collector.py` = market data
-  recorder (`tppd-collector`), `thursday_paper.py` = paper tracker (`tppd-thursday`), `vol_ping.py` = hourly
+  recorder (`tppd-collector`), `thursday_paper.py` = paper tracker (`tppd-thursday`), `bias_trader.py` = option-flow bias trade (`tppd-bias`: live Thursdays, paper other nights), `vol_ping.py` = hourly
   cron. `bot.py` = the old intraday bot (`tppd-btc`).
 - `deploy/` — systemd units, Caddyfile and the BTC crontab line, as on the server.
 
@@ -16,7 +16,7 @@ running on Abhineet's AWS Lightsail server (3.106.111.8, user `ubuntu`, code in 
 2. **Every change goes through a branch + pull request**, with tests passing on GitHub (Actions) before
    merge. Never push straight to `main` except repo housekeeping.
 3. **Tests first.** Each behaviour change ships with tests; the full suite in `server/` must stay green
-   (`cd server && python -m unittest test_condor test_partner test_btc_pnl test_collector test_thursday test_bot`).
+   (`cd server && python -m unittest test_condor test_partner test_btc_pnl test_collector test_thursday test_bias test_bot`).
 4. **Install window:** anything that restarts `tppd-condor` is installed only between **11:35 and 22:25
    IST**, and never while a position is open. Deploy tooling must refuse outside that window.
 5. **Releases are tags** (`r1`, `r2`, …). The server creates and pushes them itself when it deploys

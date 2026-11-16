@@ -31,7 +31,7 @@ if [ "${1:-}" = "--restart-partners" ]; then
 fi
 if [ "${1:-}" = "--status" ]; then
     echo "Installed: $(cat "$BOT/RELEASE" 2>/dev/null || echo 'unknown (before deploy tooling)')"
-    for s in tppd-condor tppd-pnl tppd-collector tppd-thursday tppd-btc tppd-partner-portal tppd-partner-results; do say "$s: $($SYSTEMCTL is-active $s 2>/dev/null)"; done
+    for s in tppd-condor tppd-pnl tppd-collector tppd-thursday tppd-bias tppd-btc tppd-partner-portal tppd-partner-results; do say "$s: $($SYSTEMCTL is-active $s 2>/dev/null)"; done
     exit 0
 fi
 
@@ -65,11 +65,12 @@ add() { case " $SVC " in *" $1 "*) ;; *) SVC="$SVC $1";; esac; }
 for n in $CHANGED; do
     case "$n" in
         test_*) ;;
-        condor.py) add tppd-condor; add tppd-thursday;;
-        config.py|strategy.py|delta_client.py|bot.py) add tppd-condor; add tppd-thursday; add tppd-collector; add tppd-btc;;
+        condor.py) add tppd-condor; add tppd-thursday; add tppd-bias;;
+        config.py|strategy.py|delta_client.py|bot.py) add tppd-condor; add tppd-thursday; add tppd-collector; add tppd-btc; add tppd-bias;;
         btc_pnl.py) add tppd-pnl;;
         collector.py) add tppd-collector;;
         thursday_paper.py) add tppd-thursday;;
+        bias_trader.py) add tppd-bias;;
         partner_portal.py|partner_results.py|partner_vault.py) add tppd-partner-portal; add tppd-partner-results;;
         partner_results_bot.py) add tppd-partner-results;;
         *) ;;
