@@ -260,6 +260,97 @@ class TestPaperMode(Base):
         self.assertEqual(self.rows()[0]["mode"], "paper")
 
 
+class Cand:
+    def __init__(self, kind, strike, bid, ask, delta):
+        self.kind, self.strike, self.bid, self.ask, self.delta, self.iv = kind, strike, bid, ask, delta, 0.5
+        self.symbol = f"{'P' if kind == 'put' else 'C'}-BTC-{strike}-131126"
+
+
+class TestWidePaper(Base):
+    def setUp(self):
+        super().setUp()
+        self.clock[0] = WED
+        self.r["ps"] = 0.5                                      # no bias signal: only the wide strangle
+        self.quotes = {}
+        self.b.wide_chain = lambda exp: [Cand("put", 69000, 30.0, 34.0, -0.09), Cand("put", 70000, 60.0, 66.0, -0.16),
+                                         Cand("call", 75000, 28.0, 31.0, 0.10), Cand("call", 74000, 55.0, 60.0, 0.18)]
+        self.b.opt_quote = lambda sym: self.quotes.get(sym, (30.0, 33.0))
+        self.settle = None
+        self.b.opt_settle = lambda sym: self.settle
+
+    def wide_rows(self):
+        with open(f"{self.tmp}/wide.csv") as f:
+            return list(csv.DictReader(f))
+
+    def test_opens_at_real_bids_on_skipped_night_no_orders(self):
+        self.b.step()
+        w = self.b.state["wide"][0]
+        self.assertEqual((w["put"]["strike"], w["call"]["strike"]), (69000, 75000))
+        self.assertAlmostEqual(w["credit"], 58.0)
+        self.assertEqual(self.fx.orders, [])
+        self.assertIn("PAPER wide strangle", self.msgs[-1])
+
+    def test_not_on_calm_night(self):
+        self.r["vols"] = (20, 25, 35)
+        self.b.step()
+        self.assertEqual(self.b.state["wide"], [])
+
+    def test_not_on_thursday(self):
+        self.clock[0] = THU
+        self.b.step()
+        self.assertEqual(self.b.state["wide"], [])
+
+    def test_not_without_vol_readings(self):
+        self.r["vols"] = (None, None, None)
+        self.b.step()
+        self.assertEqual(self.b.state["wide"], [])
+
+    def test_stop_when_loss_reaches_premium(self):
+        self.b.step()
+        w = self.b.state["wide"][0]
+        self.quotes = {w["put"]["symbol"]: (110.0, 118.0), w["call"]["symbol"]: (1.0, 2.0)}
+        self.clock[0] += 300
+        self.b.step()
+        self.assertEqual(self.b.state["wide"], [])
+        row = self.wide_rows()[0]
+        self.assertIn("stop", row["reason"])
+        self.assertLess(float(row["net_usd"]), -11)
+
+    def test_held_and_settled_for_profit(self):
+        self.b.step()
+        self.quotes = {}                                          # quiet: asks stay low
+        self.settle = 72000.0
+        self.clock[0] = datetime(2026, 11, 12, 17, 41, tzinfo=IST).timestamp()
+        self.b.step()
+        row = self.wide_rows()[0]
+        self.assertEqual(row["reason"], "expiry")
+        self.assertGreater(float(row["net_usd"]), 10)
+
+    def test_settled_in_the_money(self):
+        self.b.step()
+        self.settle = 76000.0                                     # call 75000 is 1,000 in the money
+        self.clock[0] = datetime(2026, 11, 12, 17, 41, tzinfo=IST).timestamp()
+        self.b.step()
+        self.assertLess(float(self.wide_rows()[0]["net_usd"]), -150)
+
+    def test_once_per_night_and_survives_restart(self):
+        self.b.step()
+        self.clock[0] += 120
+        self.b.step()
+        self.assertEqual(len(self.b.state["wide"]), 1)
+        b2 = self.make()
+        b2.wide_chain, b2.opt_quote, b2.opt_settle = self.b.wide_chain, self.b.opt_quote, self.b.opt_settle
+        self.settle = 72000.0
+        self.clock[0] = datetime(2026, 11, 12, 17, 41, tzinfo=IST).timestamp()
+        b2.step()
+        self.assertEqual(len(self.wide_rows()), 1)
+
+    def test_off_switch(self):
+        self.cfg.WIDE = False
+        self.b.step()
+        self.assertEqual(self.b.state["wide"], [])
+
+
 class TestHelpers(unittest.TestCase):
     def test_put_share_filters_near_dated_near_money(self):
         now = datetime(2026, 11, 12, 17, 0, tzinfo=timezone.utc).timestamp()

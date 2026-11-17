@@ -22,6 +22,12 @@ Exit (btc-reversal-exit-signals):
   Live trades also rest a reduce-only stop order on Delta at the stop price, in case this program stops.
 Costs: Delta futures taker fee 0.05% + 18% GST each side.
 
+Also PAPER ONLY (17 Nov 2026, btc-who-wins-volatile-nights): on every night the strangle skips for volatility
+(not calm at 22:30, not Thursday), "sell" a wide ~BIAS_WIDE_DELTA (0.10) strangle for the next 17:30 expiry at
+Delta's REAL best bids, BIAS_WIDE_LOTS (200) lots. Every 5 min it marks the cost to buy back at Delta's real best
+asks (plus fees); if the loss reaches the premium collected (BIAS_WIDE_STOP x credit) it records a stop, else it
+settles at Delta's settlement price. No orders are ever sent for this. Results in data_bias/wide.csv.
+
     python bias_trader.py            # run forever (service tppd-bias)
     python bias_trader.py --once     # readings and what it would do right now (never trades)
     python bias_trader.py --report   # results: live and paper, by filter
@@ -68,12 +74,18 @@ class BiasConfig:
     API_SECRET = CondorConfig.API_SECRET
     TELEGRAM_BOT_TOKEN = CondorConfig.TELEGRAM_BOT_TOKEN
     TELEGRAM_CHAT_ID = CondorConfig.TELEGRAM_CHAT_ID
+    WIDE = _env("BIAS_WIDE", True, bool)                    # paper wide strangle on skipped nights
+    WIDE_DELTA = _env("BIAS_WIDE_DELTA", 0.10, float)
+    WIDE_LOTS = _env("BIAS_WIDE_LOTS", 200, int)
+    WIDE_STOP = _env("BIAS_WIDE_STOP", 1.0, float)          # stop when the loss reaches this x the credit
     DERIBIT = "https://www.deribit.com/api/v2/public/"
     BINANCE = "https://fapi.binance.com"
 
 
 COLS = ["night", "day", "mode", "side", "lots", "entry_ist", "entry_px", "put_share", "crowd_ls", "spot_flow",
         "crowd_ok", "not_spent", "calm", "tp_pct", "sl_pct", "exit_ist", "exit_px", "reason", "net_usd"]
+WIDE_COLS = ["night", "day", "expiry", "lots", "spot", "put", "call", "put_bid", "call_bid", "put_bid_iv",
+             "call_bid_iv", "credit_usd", "v1", "v6", "v24", "exit_ist", "reason", "settle", "net_usd"]
 MON = {m: i for i, m in enumerate(["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV",
                                    "DEC"], 1)}
 
@@ -149,6 +161,8 @@ class BiasTrader:
         self.state_path, self.trades_path = self.dir / "state.json", self.dir / "trades.csv"
         self.state = (json.loads(self.state_path.read_text()) if self.state_path.exists()
                       else {"last_night": None, "open": []})
+        self.state.setdefault("wide", [])
+        self.wide_path = self.dir / "wide.csv"
         self.pid = None
 
     # ------------------------------------------------------------- basics
@@ -416,10 +430,112 @@ class BiasTrader:
         paper = [float(r["net_usd"]) for r in rows if r["mode"] == "paper"]
         return f"Live {len(live)} trades {sum(live):+.2f}; paper {len(paper)} trades {sum(paper):+.2f} USD."
 
+    # ------------------------------------------------- paper wide strangle
+    def wide_chain(self, exp):
+        return cd.st.parse_chain(self.c.option_chain("BTC", exp.strftime("%d-%m-%Y")), exp.strftime("%d%m%y"))
+
+    def opt_quote(self, symbol):
+        q = (self.c.ticker(symbol) or {}).get("quotes") or {}
+        return cd.st._f(q.get("best_bid")), cd.st._f(q.get("best_ask"))
+
+    def opt_settle(self, symbol):
+        s = cd.st._f((self.c.product(symbol) or {}).get("settlement_price"))
+        return s if s > 1000 else None
+
+    def ofee(self, price, spot):
+        return min(0.0001 * spot, 0.035 * price) * 1.18 if price > 0 else 0.0
+
+    def wide_open(self, info, r):
+        cfg = self.cfg
+        exp = self.expiry_after(self.now())
+        try:
+            chain = self.wide_chain(exp)
+        except Exception as e:
+            log.warning(f"wide chain failed: {e}")
+            return
+        spot = r.get("px") or 0
+        legs = {}
+        for kind in ("put", "call"):
+            pool = [c for c in chain if c.kind == kind and c.bid > 0 and c.ask > 0 and c.delta
+                    and ((c.strike < spot) if kind == "put" else (c.strike > spot))]
+            if not pool:
+                return
+            legs[kind] = min(pool, key=lambda c: abs(abs(c.delta) - cfg.WIDE_DELTA))
+        p, c = legs["put"], legs["call"]
+        u = cfg.WIDE_LOTS * 0.001
+        credit = p.bid + c.bid
+        pos = {"night": self.ist().date().isoformat(), "day": self.ist().strftime("%a"), "expiry_ts": exp.timestamp(),
+               "expiry": exp.strftime("%Y-%m-%d %H:%M"), "lots": cfg.WIDE_LOTS, "spot": spot,
+               "put": {"symbol": p.symbol, "strike": p.strike, "bid": p.bid, "iv": getattr(p, "iv", None)},
+               "call": {"symbol": c.symbol, "strike": c.strike, "bid": c.bid, "iv": getattr(c, "iv", None)},
+               "credit": credit, "fees_in": self.ofee(p.bid, spot) + self.ofee(c.bid, spot),
+               "v": [info.get("v1"), info.get("v6"), info.get("v24")], "last_mark": 0}
+        self.state["wide"].append(pos)
+        self.save()
+        self.notify(f"PAPER wide strangle (skipped night): sold put {p.strike:.0f} @ {p.bid:.1f} + call {c.strike:.0f} @ "
+                    f"{c.bid:.1f} at Delta's real bids, x{cfg.WIDE_LOTS} = ${credit * u:.2f} premium. Stop if the loss "
+                    f"reaches the premium; else held to {exp:%d %b %H:%M}. No orders.")
+
+    def wide_manage(self, pos):
+        u = pos["lots"] * 0.001
+        if self.now() >= pos["expiry_ts"] + 10 * 60:
+            S = None
+            try:
+                S = self.opt_settle(pos["put"]["symbol"])
+            except Exception:
+                pass
+            if S is None:
+                try:
+                    S = self.price()
+                except Exception:
+                    return
+            iv = max(pos["put"]["strike"] - S, 0) + max(S - pos["call"]["strike"], 0)
+            net = (pos["credit"] - iv - pos["fees_in"] - self.ofee(iv, pos["spot"])) * u
+            return self.wide_close(pos, "expiry", S, net)
+        if self.now() >= pos["expiry_ts"] or self.now() - pos.get("last_mark", 0) < 5 * 60 - 5:
+            return
+        pos["last_mark"] = self.now()
+        try:
+            _, pa = self.opt_quote(pos["put"]["symbol"])
+            _, ca = self.opt_quote(pos["call"]["symbol"])
+        except Exception as e:
+            log.warning(f"wide mark failed: {e}")
+            return
+        if pa <= 0 or ca <= 0:
+            return
+        pnl = (pos["credit"] - pa - ca - pos["fees_in"] - self.ofee(pa, pos["spot"]) - self.ofee(ca, pos["spot"])) * u
+        pos["worst"] = min(pos.get("worst", 0.0), pnl)
+        self.save()
+        if pnl <= -self.cfg.WIDE_STOP * pos["credit"] * u:
+            self.wide_close(pos, f"stop (asks {pa:.1f} + {ca:.1f})", None, pnl)
+
+    def wide_close(self, pos, reason, settle, net):
+        new = not self.wide_path.exists()
+        with self.wide_path.open("a", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(WIDE_COLS)
+            v = pos.get("v") or [None, None, None]
+            w.writerow([pos["night"], pos["day"], pos["expiry"], pos["lots"], round(pos["spot"], 1), pos["put"]["strike"],
+                        pos["call"]["strike"], pos["put"]["bid"], pos["call"]["bid"], pos["put"]["iv"], pos["call"]["iv"],
+                        round(pos["credit"] * pos["lots"] * 0.001, 2), *[None if x is None else round(x, 1) for x in v],
+                        self.ist().strftime("%Y-%m-%d %H:%M"), reason, settle, round(net, 2)])
+        self.state["wide"] = [p for p in self.state["wide"] if p is not pos]
+        self.save()
+        with self.wide_path.open() as f:
+            tot = [float(r["net_usd"]) for r in csv.DictReader(f)]
+        self.notify(f"PAPER wide strangle {pos['night']} closed: {reason}. Net {net:+.2f} USD. "
+                    f"Wide paper total: {len(tot)} nights, {sum(tot):+.2f} USD.")
+
     # --------------------------------------------------------------- loop
     def step(self):
         for pos in list(self.state["open"]):
             self.manage(pos)
+        for pos in list(self.state["wide"]):
+            try:
+                self.wide_manage(pos)
+            except Exception:
+                log.exception("wide paper error")
         night = self.ist().date().isoformat()
         if not self.in_window() or self.state.get("last_night") == night:
             return
@@ -427,6 +543,9 @@ class BiasTrader:
         self.save()
         r = self.readings()
         side, info, why = self.decide(r)
+        if (self.cfg.WIDE and info.get("calm") is False and info.get("v24") is not None and not info.get("thursday")
+                and not any(p["night"] == night for p in self.state["wide"])):
+            self.wide_open(info, r)
         if side:
             self.enter(side, info, r)
         elif info["thursday"]:
@@ -463,6 +582,10 @@ def main():
                               ("Thursdays", lambda r: r["day"] == "Thu")):
                 x = [float(r["net_usd"]) for r in rows if keep(r)]
                 print(f"{lab:18s} {len(x):3d} trades  {sum(x):+9.2f} USD")
+        if bot.wide_path.exists():
+            with bot.wide_path.open() as f:
+                w = [float(r["net_usd"]) for r in csv.DictReader(f)]
+            print(f"{'wide strangle':18s} {len(w):3d} nights  {sum(w):+9.2f} USD (paper, real Delta bids/asks)")
         return
     if a.once:
         r = bot.readings()
