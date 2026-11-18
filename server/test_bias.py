@@ -246,6 +246,14 @@ class TestExit(Base):
         self.assertEqual(len(self.rows()), 1)
 
 
+class TestDefaults(unittest.TestCase):
+    def test_live_by_default_on_thursday_only(self):
+        import os
+        if not os.environ.get("BIAS_MODE"):
+            self.assertEqual(bt.BiasConfig.MODE, "live")
+        self.assertEqual(bt.BiasConfig.LIVE_DAYS, "Thu")
+
+
 class TestPaperMode(Base):
     mode = "paper"
 

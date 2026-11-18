@@ -11,7 +11,8 @@ Rule (btc-putcall-bias-nights, btc-bias-entry-filters, Thursday check of 16 Nov 
       crowd:  Binance all-account long/short ratio >= BIAS_CROWD_MIN (1.3)
       spent:  Binance taker-buy share of the last 3 h is no more than BIAS_SPOTFLOW_MAX (1.5) points past
               50% in our direction (the move is not already spent)
-  * LIVE only when: BIAS_MODE=live, the night is in BIAS_LIVE_DAYS (Thu), signal, crowd filter passes.
+  * LIVE (default, BIAS_MODE=live) only when the night is in BIAS_LIVE_DAYS (Thu), signal, crowd filter passes.
+    BIAS_MODE=paper switches live trading off completely.
     Everything else with a signal is a PAPER trade (no orders), so the rule is tracked on all nights.
 Exit (btc-reversal-exit-signals):
   * expected move EM = 24 h realised vol x sqrt(hours to the next 17:30 IST / 8760)
@@ -52,7 +53,7 @@ def _env(name, default, cast=str):
 
 
 class BiasConfig:
-    MODE = _env("BIAS_MODE", "paper")                       # paper | live (live only on BIAS_LIVE_DAYS)
+    MODE = _env("BIAS_MODE", "live")                        # live (default): live on BIAS_LIVE_DAYS only; paper = never trade
     LIVE_DAYS = _env("BIAS_LIVE_DAYS", "Thu")
     LOTS = _env("BIAS_LOTS", 50, int)                       # BTCUSD perpetual contracts (0.001 BTC each)
     SYMBOL = _env("BIAS_SYMBOL", "BTCUSD")
